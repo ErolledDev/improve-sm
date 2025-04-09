@@ -119,6 +119,14 @@ const EmailBox = () => {
       
       previousEmailCountRef.current = newEmails.length;
       setEmails(newEmails);
+
+      // Save emails to session storage with timestamp
+      const sessionData = {
+        emails: newEmails,
+        timestamp: emailTimestamp,
+        emailAddress: emailAddress
+      };
+      sessionStorage.setItem(EMAILS_STORAGE_KEY, JSON.stringify(sessionData));
     } catch (error) {
       console.error('Failed to check emails:', error);
       toast.error('Failed to check emails. Retrying...', {
@@ -131,7 +139,7 @@ const EmailBox = () => {
         setInitialLoading(false);
       }
     }
-  }, [client, emails]);
+  }, [client, emails, emailAddress, emailTimestamp]);
 
   const handleEmailClick = useCallback(async (email: Email) => {
     try {
@@ -139,6 +147,18 @@ const EmailBox = () => {
       const fullEmail = await client.fetchEmail(email.mail_id);
       setSelectedEmail({ ...email, mail_body: fullEmail.mail_body });
       document.title = ORIGINAL_TITLE;
+
+      // Update email in session storage
+      const sessionData = JSON.parse(sessionStorage.getItem(EMAILS_STORAGE_KEY) || '{}');
+      if (sessionData.emails) {
+        const updatedEmails = sessionData.emails.map((e: Email) => 
+          e.mail_id === email.mail_id ? { ...e, mail_body: fullEmail.mail_body } : e
+        );
+        sessionStorage.setItem(EMAILS_STORAGE_KEY, JSON.stringify({
+          ...sessionData,
+          emails: updatedEmails
+        }));
+      }
     } catch (error) {
       console.error('Failed to fetch email:', error);
       toast.error('Failed to load email content. Please try again.', {
@@ -201,6 +221,14 @@ const EmailBox = () => {
     }
   }, [checkEmails, isRefreshing]);
 
+  const clearEmailSession = () => {
+    localStorage.removeItem(EMAIL_STORAGE_KEY);
+    localStorage.removeItem(EMAILS_STORAGE_KEY);
+    localStorage.removeItem(EMAIL_TIMESTAMP_KEY);
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    sessionStorage.removeItem(EMAILS_STORAGE_KEY);
+  };
+
   const handleNewEmail = useCallback(async () => {
     if (isTrashDisabled) {
       toast.error('Please wait before generating a new email', {
@@ -218,10 +246,7 @@ const EmailBox = () => {
       const response = await client.getEmailAddress();
       
       // Clear all storage before setting new email
-      localStorage.removeItem(EMAIL_STORAGE_KEY);
-      localStorage.removeItem(EMAILS_STORAGE_KEY);
-      localStorage.removeItem(EMAIL_TIMESTAMP_KEY);
-      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      clearEmailSession();
       
       const newTimestamp = Date.now();
       setEmailAddress(response.email_addr);
@@ -230,14 +255,16 @@ const EmailBox = () => {
       setEmails([]);
       setSelectedEmail(null);
       
-      // Immediately save new state
-      localStorage.setItem(EMAIL_STORAGE_KEY, response.email_addr);
-      localStorage.setItem(EMAIL_TIMESTAMP_KEY, String(newTimestamp));
-      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+      // Save new session data
+      const sessionData = {
         email: response.email_addr,
         timestamp: newTimestamp,
         domain: selectedDomain
-      }));
+      };
+      
+      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionData));
+      localStorage.setItem(EMAIL_STORAGE_KEY, response.email_addr);
+      localStorage.setItem(EMAIL_TIMESTAMP_KEY, String(newTimestamp));
       
       toast.success('New email address generated', {
         duration: 3000,
@@ -280,7 +307,25 @@ const EmailBox = () => {
       const response = await client.setEmailUser(newEmailUser);
       setEmailAddress(response.email_addr);
       setIsEditing(false);
-      setEmailTimestamp(Date.now());
+      
+      const newTimestamp = Date.now();
+      setEmailTimestamp(newTimestamp);
+      
+      // Clear previous session data
+      clearEmailSession();
+      
+      // Save new session data
+      const sessionData = {
+        email: response.email_addr,
+        timestamp: newTimestamp,
+        domain: selectedDomain
+      };
+      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionData));
+      localStorage.setItem(EMAIL_STORAGE_KEY, response.email_addr);
+      localStorage.setItem(EMAIL_TIMESTAMP_KEY, String(newTimestamp));
+      
+      setEmails([]);
+      setSelectedEmail(null);
       
       toast.success('Email address updated successfully', {
         duration: 3000,
@@ -305,7 +350,24 @@ const EmailBox = () => {
       const response = await client.setEmailUser(username);
       setEmailAddress(response.email_addr);
       setNewEmailUser(username);
+      
+      // Clear previous session data
+      clearEmailSession();
+      
+      // Save new session data
+      const newTimestamp = Date.now();
+      const sessionData = {
+        email: response.email_addr,
+        timestamp: newTimestamp,
+        domain: domain
+      };
+      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionData));
       localStorage.setItem(DOMAIN_STORAGE_KEY, domain);
+      localStorage.setItem(EMAIL_STORAGE_KEY, response.email_addr);
+      localStorage.setItem(EMAIL_TIMESTAMP_KEY, String(newTimestamp));
+      
+      setEmails([]);
+      setSelectedEmail(null);
       
       toast.success('Domain changed successfully', {
         duration: 3000,
@@ -331,10 +393,30 @@ const EmailBox = () => {
           return; // Skip initialization if we just generated a new email
         }
 
+        // Try to restore session from storage
+        const sessionData = sessionStorage.getItem(SESSION_STORAGE_KEY);
         const savedEmail = localStorage.getItem(EMAIL_STORAGE_KEY);
         const savedTimestamp = localStorage.getItem(EMAIL_TIMESTAMP_KEY);
         
-        if (savedEmail && savedTimestamp) {
+        if (sessionData) {
+          const { email, timestamp, domain } = JSON.parse(sessionData);
+          const emailUser = email.split('@')[0];
+          const response = await client.setEmailUser(emailUser);
+          setEmailAddress(response.email_addr);
+          setNewEmailUser(emailUser);
+          setEmailTimestamp(timestamp);
+          setSelectedDomain(domain);
+
+          // Restore emails from session storage
+          const emailsData = sessionStorage.getItem(EMAILS_STORAGE_KEY);
+          if (emailsData) {
+            const { emails: savedEmails, emailAddress: savedEmailAddress } = JSON.parse(emailsData);
+            if (savedEmailAddress === email) {
+              setEmails(savedEmails);
+              previousEmailCountRef.current = savedEmails.length;
+            }
+          }
+        } else if (savedEmail && savedTimestamp) {
           const emailUser = savedEmail.split('@')[0];
           const response = await client.setEmailUser(emailUser);
           setEmailAddress(response.email_addr);
@@ -375,65 +457,13 @@ const EmailBox = () => {
     };
   }, [client, checkEmails]);
 
-  // Load saved state
+  // Load saved domain
   useEffect(() => {
-    const savedEmail = localStorage.getItem(EMAIL_STORAGE_KEY);
-    const savedEmails = localStorage.getItem(EMAILS_STORAGE_KEY);
     const savedDomain = localStorage.getItem(DOMAIN_STORAGE_KEY) as keyof typeof EMAIL_DOMAINS;
-    const savedSession = sessionStorage.getItem(SESSION_STORAGE_KEY);
-    
-    const sessionTimestamp = savedSession ? JSON.parse(savedSession).timestamp : null;
-    const cookieTimestamp = document.cookie
-      .split('; ')
-      .find(row => row.startsWith('email_timestamp='))
-      ?.split('=')[1];
-    
-    const savedTimestamp = sessionTimestamp || cookieTimestamp || localStorage.getItem(EMAIL_TIMESTAMP_KEY);
-    
-    if (savedEmail) {
-      setEmailAddress(savedEmail);
-      setNewEmailUser(savedEmail.split('@')[0]);
-    }
-    
-    if (savedEmails) {
-      try {
-        const parsedEmails = JSON.parse(savedEmails);
-        setEmails(parsedEmails);
-        previousEmailCountRef.current = parsedEmails.length;
-      } catch (e) {
-        console.error('Failed to parse saved emails:', e);
-      }
-    }
-
     if (savedDomain && EMAIL_DOMAINS[savedDomain]) {
       setSelectedDomain(savedDomain);
     }
-
-    if (savedTimestamp) {
-      setEmailTimestamp(Number(savedTimestamp));
-    }
   }, []);
-
-  // Save state
-  useEffect(() => {
-    if (emailAddress && emailTimestamp) {
-      localStorage.setItem(EMAIL_STORAGE_KEY, emailAddress);
-      localStorage.setItem(EMAIL_TIMESTAMP_KEY, String(emailTimestamp));
-      localStorage.setItem(DOMAIN_STORAGE_KEY, selectedDomain);
-      
-      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
-        email: emailAddress,
-        timestamp: emailTimestamp,
-        domain: selectedDomain
-      }));
-      
-      document.cookie = `email_timestamp=${emailTimestamp}; path=/; SameSite=Strict`;
-    }
-    
-    if (emails.length > 0) {
-      localStorage.setItem(EMAILS_STORAGE_KEY, JSON.stringify(emails));
-    }
-  }, [emailAddress, emails, selectedDomain, emailTimestamp]);
 
   if (initialLoading) {
     return (
